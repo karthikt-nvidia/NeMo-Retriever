@@ -1,0 +1,64 @@
+name: skill-eval-smoke
+
+# Purpose: wire-test the artifact-upload contract on this fork before
+# porting the full harbor eval pipeline. Emits a placeholder eval-result
+# tarball shaped like AIQ / RAG dashboard-consumable artifacts, uploaded
+# under the `nemo-retriever-skill-eval-results-<run_id>` name. Feeds the
+# staging bp-skill-eval-dashboard smoke test.
+#
+# When this run is green and Sarath's dashboard picks up the artifact,
+# we replace the placeholder step with a real `uvx harbor run` (see
+# karthikt-nvidia fork branch karthikt/skill-eval-first-cut, upcoming).
+
+on:
+  workflow_dispatch:
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build placeholder harbor-shaped result tree
+        run: |
+          set -euo pipefail
+          OUT_DIR="/tmp/skill-eval-out/${GITHUB_RUN_ID}"
+          RUN_ROOT="${OUT_DIR}/2026-01-01__00-00-00"
+          TRIAL_DIR="${RUN_ROOT}/nemo-retriever-001__smoke"
+          mkdir -p "${TRIAL_DIR}/verifier" "${TRIAL_DIR}/agent"
+
+          cat > "${RUN_ROOT}/result.json" <<JSON
+          {
+            "id": "smoke-${GITHUB_RUN_ID}",
+            "note": "placeholder run \u2014 wiring smoke test for evals CI on karthikt-nvidia/NeMo-Retriever fork. real harbor invocation lands next.",
+            "n_total_trials": 1,
+            "stats": {
+              "n_completed_trials": 1,
+              "evals": {
+                "smoke": {"n_trials": 1, "metrics": [{"mean": 1.0}]}
+              }
+            }
+          }
+          JSON
+
+          cat > "${TRIAL_DIR}/result.json" <<JSON
+          {"id": "nemo-retriever-001__smoke", "reward": 1.0, "note": "placeholder"}
+          JSON
+
+          echo 1.0 > "${TRIAL_DIR}/verifier/reward.txt"
+          echo "smoke-test placeholder \u2014 0/0 checks (no agent run)." > "${TRIAL_DIR}/verifier/test-stdout.txt"
+
+          cat > "${TRIAL_DIR}/agent/trajectory.json" <<JSON
+          {"schema": "atif-v1.7", "steps": [], "note": "placeholder"}
+          JSON
+
+          echo "OUT_DIR=${OUT_DIR}" >> "$GITHUB_ENV"
+
+      - name: Upload artifact (dashboard contract)
+        uses: actions/upload-artifact@v4
+        with:
+          name: nemo-retriever-skill-eval-results-${{ github.run_id }}
+          path: ${{ env.OUT_DIR }}
+          retention-days: 7
