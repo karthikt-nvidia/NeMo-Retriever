@@ -21,7 +21,37 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Build placeholder harbor-shaped result tree
+      - name: Verify NVIDIA inference-api reachability
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          ANTHROPIC_BASE_URL: https://inference-api.nvidia.com
+          ANTHROPIC_MODEL: aws/anthropic/bedrock-claude-sonnet-4-6
+        run: |
+          set -euo pipefail
+          if [ -z "${ANTHROPIC_API_KEY:-}" ]; then
+            echo "::error::ANTHROPIC_API_KEY secret is not set on this repo"
+            exit 1
+          fi
+
+          HTTP_CODE=$(curl -sS -o /tmp/llm-reply.json -w "%{http_code}" \
+            -H "x-api-key: ${ANTHROPIC_API_KEY}" \
+            -H "anthropic-version: 2023-06-01" \
+            -H "content-type: application/json" \
+            -d "{\"model\":\"${ANTHROPIC_MODEL}\",\"max_tokens\":32,\"messages\":[{\"role\":\"user\",\"content\":\"Reply with the single word: SMOKE_OK\"}]}" \
+            "${ANTHROPIC_BASE_URL}/v1/messages")
+
+          echo "HTTP ${HTTP_CODE}"
+          if [ "${HTTP_CODE}" != "200" ]; then
+            echo "::error::inference-api call failed"
+            head -c 500 /tmp/llm-reply.json || true
+            exit 1
+          fi
+
+          LLM_TEXT=$(python3 -c 'import json,sys; d=json.load(open("/tmp/llm-reply.json")); print(d["content"][0]["text"].strip())')
+          echo "LLM reply: ${LLM_TEXT}"
+          echo "LLM_TEXT=${LLM_TEXT}" >> "$GITHUB_ENV"
+
+      - name: Build harbor-shaped result tree (with live LLM reply)
         run: |
           set -euo pipefail
           OUT_DIR="/tmp/skill-eval-out/${GITHUB_RUN_ID}"
@@ -29,29 +59,39 @@ jobs:
           TRIAL_DIR="${RUN_ROOT}/nemo-retriever-001__smoke"
           mkdir -p "${TRIAL_DIR}/verifier" "${TRIAL_DIR}/agent"
 
+          # Deterministic pass/fail: agent replied with expected token?
+          if [ "${LLM_TEXT}" = "SMOKE_OK" ]; then
+            REWARD=1.0
+            NOTE="live LLM smoke passed \u2014 model returned expected token"
+          else
+            REWARD=0.5
+            NOTE="live LLM reachable but reply \"${LLM_TEXT}\" != SMOKE_OK"
+          fi
+
           cat > "${RUN_ROOT}/result.json" <<JSON
           {
             "id": "smoke-${GITHUB_RUN_ID}",
-            "note": "placeholder run \u2014 wiring smoke test for evals CI on karthikt-nvidia/NeMo-Retriever fork. real harbor invocation lands next.",
+            "note": "${NOTE}",
             "n_total_trials": 1,
             "stats": {
               "n_completed_trials": 1,
               "evals": {
-                "smoke": {"n_trials": 1, "metrics": [{"mean": 1.0}]}
+                "smoke": {"n_trials": 1, "metrics": [{"mean": ${REWARD}}]}
               }
             }
           }
           JSON
 
           cat > "${TRIAL_DIR}/result.json" <<JSON
-          {"id": "nemo-retriever-001__smoke", "reward": 1.0, "note": "placeholder"}
+          {"id": "nemo-retriever-001__smoke", "reward": ${REWARD}, "note": "${NOTE}"}
           JSON
 
-          echo 1.0 > "${TRIAL_DIR}/verifier/reward.txt"
-          echo "smoke-test placeholder \u2014 0/0 checks (no agent run)." > "${TRIAL_DIR}/verifier/test-stdout.txt"
+          echo "${REWARD}" > "${TRIAL_DIR}/verifier/reward.txt"
+          echo "check 1: LLM_TEXT == SMOKE_OK -> reward ${REWARD}" > "${TRIAL_DIR}/verifier/test-stdout.txt"
+          echo "actual: ${LLM_TEXT}" >> "${TRIAL_DIR}/verifier/test-stdout.txt"
 
           cat > "${TRIAL_DIR}/agent/trajectory.json" <<JSON
-          {"schema": "atif-v1.7", "steps": [], "note": "placeholder"}
+          {"schema": "atif-v1.7", "steps": [{"tool": "inference-api.messages", "model": "aws/anthropic/bedrock-claude-sonnet-4-6", "input": "Reply with the single word: SMOKE_OK", "output": "${LLM_TEXT}"}]}
           JSON
 
           echo "OUT_DIR=${OUT_DIR}" >> "$GITHUB_ENV"
