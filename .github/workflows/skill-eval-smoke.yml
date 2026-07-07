@@ -59,6 +59,7 @@ jobs:
           # (--from-dir) ingestion to place the run on the trend timeline.
           STARTED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           STARTED_AT_DIR="$(date -u +%Y-%m-%d__%H-%M-%S)"
+          STARTED_AT_EPOCH="$(date -u +%s)"
 
           OUT_DIR="/tmp/skill-eval-out/${GITHUB_RUN_ID}"
           RUN_ROOT="${OUT_DIR}/${STARTED_AT_DIR}"
@@ -96,8 +97,31 @@ jobs:
           }
           JSON
 
+          # Per-trial result.json — shape requested by Sarath for dashboard
+          # per-trial ingest. `agent_result` is zeroed for this hand-baked
+          # smoke (single curl → inference-api, not a real harbor agent run);
+          # when we cut over to `uvx harbor run`, harbor writes real token
+          # counts + cost_usd into this same shape natively.
+          FINISHED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          FINISHED_AT_EPOCH="$(date -u +%s)"
+          DURATION_S=$(( FINISHED_AT_EPOCH - STARTED_AT_EPOCH ))
           cat > "${TRIAL_DIR}/result.json" <<JSON
-          {"id": "nemo-retriever-001__smoke", "reward": ${REWARD}, "note": "${NOTE}"}
+          {
+            "id": "nemo-retriever-001__smoke",
+            "started_at": "${STARTED_AT}",
+            "finished_at": "${FINISHED_AT}",
+            "duration_s": ${DURATION_S},
+            "agent_result": {
+              "n_input_tokens": 0,
+              "n_cache_tokens": 0,
+              "n_output_tokens": 0,
+              "cost_usd": 0.0
+            },
+            "verifier_result": {
+              "rewards": {"reward": ${REWARD}}
+            },
+            "note": "${NOTE}"
+          }
           JSON
 
           echo "${REWARD}" > "${TRIAL_DIR}/verifier/reward.txt"
