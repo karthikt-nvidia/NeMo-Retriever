@@ -100,14 +100,47 @@ def call_judge(prompt: str, model: str) -> dict[str, Any]:
             "NEMO_RETRIEVER_JUDGE_BASE", "https://inference-api.nvidia.com/v1"
         ),
     )
-    response = client.chat.completions.create(
-        model=model,
-        messages=[{"role": "user", "content": prompt}],
-        response_format={"type": "json_object"},
-        temperature=0,
-    )
-    content = response.choices[0].message.content or "{}"
-    return json.loads(content)
+    # LiteLLM proxies to Bedrock don't always honor response_format
+    # (silently return plain-text or empty). Try structured first, fall
+    # back to unstructured + regex-extract of the first {...} block.
+    def _create(with_response_format: bool):
+        kwargs = dict(
+            model=model,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0,
+        )
+        if with_response_format:
+            kwargs["response_format"] = {"type": "json_object"}
+        return client.chat.completions.create(**kwargs)
+
+    raw_content = ""
+    for attempt in (True, False):
+        try:
+            response = _create(with_response_format=attempt)
+        except Exception as exc:  # noqa: BLE001
+            print(f"JUDGE_ATTEMPT_ERROR (response_format={attempt}): {exc}", file=sys.stderr)
+            continue
+        raw_content = (response.choices[0].message.content or "").strip()
+        if raw_content:
+            break
+
+    log_dir = Path(os.environ.get("NEMO_RETRIEVER_EVAL_VERIFIER_LOG_DIR", "/logs/verifier"))
+    log_dir.mkdir(parents=True, exist_ok=True)
+    (log_dir / "judge-raw.txt").write_text(raw_content or "(empty)")
+
+    if not raw_content:
+        raise ValueError("judge model returned empty content")
+
+    # Direct parse; else pull first JSON object from wrapped text.
+    try:
+        return json.loads(raw_content)
+    except json.JSONDecodeError:
+        import re
+
+        match = re.search(r"\{.*\}", raw_content, re.DOTALL)
+        if not match:
+            raise ValueError(f"judge reply is not JSON: {raw_content[:200]!r}")
+        return json.loads(match.group(0))
 
 
 def to_check_rows(grade: dict[str, Any], threshold: float) -> list[dict[str, Any]]:
