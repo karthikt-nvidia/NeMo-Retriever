@@ -78,6 +78,13 @@ jobs:
           {
             "id": "smoke-${GITHUB_RUN_ID}",
             "started_at": "${STARTED_AT}",
+            "run_id": "${GITHUB_RUN_ID}",
+            "run_url": "https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}",
+            "trigger": "${GITHUB_EVENT_NAME}",
+            "owner": "${GITHUB_REPOSITORY_OWNER}",
+            "repository": "${GITHUB_REPOSITORY}",
+            "ref": "${GITHUB_REF_NAME}",
+            "sha": "${GITHUB_SHA}",
             "note": "${NOTE}",
             "n_total_trials": 1,
             "stats": {
