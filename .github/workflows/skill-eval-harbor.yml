@@ -1,0 +1,231 @@
+name: skill-eval-harbor
+
+# Runs the real harbor skill-eval pipeline (not the placeholder in
+# skill-eval-smoke.yml) against both nemo-retriever specs:
+#   * local_cpu.json           — deterministic verifier (retriever_checks.py)
+#   * local_cpu_agentic.json   — LLM-as-judge verifier (retriever_judge.py)
+#
+# Uploads the raw harbor results tree under the same artifact name shape
+# the smoke workflow uses, so Sarath's bp-skill-eval-dashboard picks both
+# up without contract drift: nemo-retriever-skill-eval-results-<run_id>.
+#
+# Corpus PDFs are gitignored, so we synthesize a small text-PDF fixture
+# with reportlab at CI time — same filenames the specs reference. Judge
+# scores against synthetic content are lower than local runs (Karthik's
+# local run hit 0.99 with the real corpus), but the artifact SHAPE is
+# identical, which is what the dashboard port needs.
+
+on:
+  workflow_dispatch:
+    inputs:
+      spec:
+        description: 'Which spec to run'
+        required: false
+        default: all
+        type: choice
+        options:
+          - all
+          - local_cpu
+          - local_cpu_agentic
+
+jobs:
+  harbor:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install uv (uvx harbor)
+        uses: astral-sh/setup-uv@v3
+        with:
+          version: latest
+
+      - name: Preflight — verify required secrets
+        env:
+          NVCF_API_KEY: ${{ secrets.NVCF_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          set -euo pipefail
+          missing=0
+          if [ -z "${NVCF_API_KEY:-}" ]; then
+            echo "::error::NVCF_API_KEY secret is not set (nvapi-... embed NIM cred)"
+            missing=1
+          fi
+          if [ -z "${ANTHROPIC_API_KEY:-}" ]; then
+            echo "::error::ANTHROPIC_API_KEY secret is not set (sk-... LiteLLM key)"
+            missing=1
+          fi
+          [ "$missing" = "0" ] || exit 1
+
+      - name: Synthesize corpus fixtures (PDFs)
+        run: |
+          set -euo pipefail
+          pip install --quiet reportlab
+          python3 - <<'PY'
+          from pathlib import Path
+          from reportlab.lib.pagesizes import letter
+          from reportlab.pdfgen import canvas
+
+          out = Path("skills/nemo-retriever/eval/fixtures/research_reports")
+          out.mkdir(parents=True, exist_ok=True)
+
+          fixtures = {
+              "Astra Oncall.pdf": [
+                  "Astra Platform On-Call Rotation",
+                  "",
+                  "The Astra platform SRE team runs a weekly on-call rotation,",
+                  "Monday 09:00 PT to the following Monday 09:00 PT. Handoff",
+                  "occurs via the #astra-oncall Slack channel with a written",
+                  "runbook summary of open incidents.",
+                  "",
+                  "Escalation Policy:",
+                  "  - Primary responder acknowledges pages within 5 minutes.",
+                  "  - After 15 minutes unacknowledged, page secondary.",
+                  "  - After 30 minutes, page the engineering manager.",
+                  "",
+                  "The rotation covers the AIQ Blueprint deployment as well",
+                  "as core Astra platform services (MAMS, LangSmith,",
+                  "SwiftStack ACL).",
+              ],
+              "AIQ BP on Astra.pdf": [
+                  "AIQ Blueprint on the Astra Platform",
+                  "",
+                  "AIQ Blueprint is deployed as an NVCF hosted function on the",
+                  "Astra platform. The blueprint provides a research-assistant",
+                  "agent built on the OpenAI SDK with MCP-brokered tools.",
+                  "",
+                  "The on-call responder for AIQ BP is the Astra SRE team",
+                  "under the Astra on-call rotation (see Astra Oncall report).",
+                  "",
+                  "Runbook triage steps:",
+                  "  1. Check NVCF function health via the Astra dashboard.",
+                  "  2. Inspect MAMS memory service reachability.",
+                  "  3. Verify LangSmith trace ingestion.",
+                  "  4. Re-deploy the NVCF function if health checks fail.",
+              ],
+              "Introduction to AIQ Research Assistant.pdf": [
+                  "Introduction to the AIQ Research Assistant",
+                  "",
+                  "AIQ is an agent framework built on the OpenAI SDK plus MCP",
+                  "brokered tools. It is deployed as an NVCF hosted function",
+                  "on the Astra platform, backed by NIM embeddings and a",
+                  "LanceDB vector store for RAG retrieval.",
+                  "",
+                  "Architecture components:",
+                  "  - Orchestrator: OpenAI-SDK agent loop.",
+                  "  - Tool broker: MCP bridge to GitLab, Slack, PagerDuty.",
+                  "  - Retrieval: LanceDB via nemo-retriever library.",
+                  "  - Memory: MAMS-backed session state.",
+                  "",
+                  "Operational ownership follows the Astra platform on-call",
+                  "rotation described in the Astra Oncall report.",
+              ],
+          }
+
+          for name, lines in fixtures.items():
+              path = out / name
+              c = canvas.Canvas(str(path), pagesize=letter)
+              c.setFont("Helvetica", 11)
+              y = 750
+              for line in lines:
+                  c.drawString(72, y, line)
+                  y -= 16
+                  if y < 72:
+                      c.showPage()
+                      c.setFont("Helvetica", 11)
+                      y = 750
+              c.showPage()
+              c.save()
+              print(f"wrote {path} ({path.stat().st_size} bytes)")
+          PY
+          ls -la skills/nemo-retriever/eval/fixtures/research_reports/
+
+      - name: Filter specs (optional single-spec run)
+        if: ${{ inputs.spec != 'all' }}
+        run: |
+          set -euo pipefail
+          keep="${{ inputs.spec }}.json"
+          find skills/nemo-retriever/eval -maxdepth 1 -name '*.json' -not -name "$keep" -print -delete
+          echo "kept only: $keep"
+          ls skills/nemo-retriever/eval/
+
+      - name: Run harbor eval pipeline
+        env:
+          # nvapi-... embed NIM cred (integrate.api.nvidia.com)
+          NVCF_API_KEY: ${{ secrets.NVCF_API_KEY }}
+          # sk-... LiteLLM key (inference-api.nvidia.com — used by both
+          # the claude-code agent and the llm_judge verifier)
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          ANTHROPIC_BASE_URL: https://inference-api.nvidia.com
+          ANTHROPIC_MODEL: aws/anthropic/bedrock-claude-sonnet-4-6
+          NEMO_RETRIEVER_EVAL_RESULTS_DIR: /tmp/nemo-retriever-eval/results
+          NEMO_RETRIEVER_EVAL_OUTPUT_DIR: /tmp/nemo-retriever-eval/datasets
+        run: |
+          set -euo pipefail
+
+          # Judge key MUST be exported into the shell so docker-compose
+          # interpolates ${NEMO_RETRIEVER_JUDGE_API_KEY} into the verifier
+          # container — harbor's --ae only forwards to the agent container.
+          export NEMO_RETRIEVER_JUDGE_API_KEY="$ANTHROPIC_API_KEY"
+
+          # The container-side NVIDIA_API_KEY is the embed cred (nvapi-...),
+          # not the LiteLLM key. Overwrite for the harbor invocation.
+          export NVIDIA_API_KEY="$NVCF_API_KEY"
+
+          echo "harbor env:"
+          echo "  ANTHROPIC_MODEL=$ANTHROPIC_MODEL"
+          echo "  ANTHROPIC_API_KEY suffix=***${ANTHROPIC_API_KEY: -4}"
+          echo "  NVIDIA_API_KEY suffix=***${NVIDIA_API_KEY: -4}"
+          echo "  NEMO_RETRIEVER_JUDGE_API_KEY suffix=***${NEMO_RETRIEVER_JUDGE_API_KEY: -4}"
+
+          python3 .github/skill-eval/skills_eval_agent.py --all --run-harbor
+
+      - name: Stage results for artifact upload
+        if: always()
+        run: |
+          set -uo pipefail
+          OUT_DIR="/tmp/skill-eval-out/${GITHUB_RUN_ID}"
+          mkdir -p "$OUT_DIR"
+          if [ -d /tmp/nemo-retriever-eval/results ]; then
+            cp -R /tmp/nemo-retriever-eval/results/. "$OUT_DIR/"
+          else
+            echo "::warning::no harbor results dir found — staging empty"
+          fi
+
+          # Drop a manifest so the dashboard has run-level metadata even if
+          # harbor bailed early. Mirrors the smoke workflow's top-level shape.
+          STARTED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          cat > "$OUT_DIR/manifest.json" <<JSON
+          {
+            "id": "harbor-${GITHUB_RUN_ID}",
+            "started_at": "${STARTED_AT}",
+            "run_id": "${GITHUB_RUN_ID}",
+            "run_url": "https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}",
+            "trigger": "${GITHUB_EVENT_NAME}",
+            "owner": "${GITHUB_REPOSITORY_OWNER}",
+            "repository": "${GITHUB_REPOSITORY}",
+            "ref": "${GITHUB_REF_NAME}",
+            "sha": "${GITHUB_SHA}",
+            "spec_input": "${{ inputs.spec }}",
+            "note": "real uvx harbor run — deterministic + llm_judge specs"
+          }
+          JSON
+
+          echo "staged artifact tree:"
+          find "$OUT_DIR" -maxdepth 4 -print | head -80
+          echo "OUT_DIR=$OUT_DIR" >> "$GITHUB_ENV"
+
+      - name: Upload artifact (dashboard contract)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nemo-retriever-skill-eval-results-${{ github.run_id }}
+          path: ${{ env.OUT_DIR }}
+          retention-days: 14
