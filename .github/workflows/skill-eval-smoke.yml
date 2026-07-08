@@ -1,14 +1,16 @@
 name: skill-eval-smoke
 
-# Purpose: wire-test the artifact-upload contract on this fork before
-# porting the full harbor eval pipeline. Emits a placeholder eval-result
-# tarball shaped like AIQ / RAG dashboard-consumable artifacts, uploaded
-# under the `nemo-retriever-skill-eval-results-<run_id>` name. Feeds the
-# staging bp-skill-eval-dashboard smoke test.
+# DISABLED 2026-07-08 — superseded by skill-eval-harbor.yml which emits
+# the same `nemo-retriever-skill-eval-results-<run_id>` artifact shape
+# with a real `uvx harbor run`. Kept in-tree as the artifact-contract
+# reference until Sarath's dashboard confirms it ingests the harbor
+# artifact successfully; flip `if: false` back to true (or delete this
+# file) once that's confirmed.
 #
-# When this run is green and Sarath's dashboard picks up the artifact,
-# we replace the placeholder step with a real `uvx harbor run` (see
-# karthikt-nvidia fork branch karthikt/skill-eval-first-cut, upcoming).
+# Purpose (historical): wire-test the artifact-upload contract on this
+# fork before porting the full harbor eval pipeline. Emits a placeholder
+# eval-result tarball shaped like AIQ / RAG dashboard-consumable
+# artifacts.
 
 on:
   workflow_dispatch:
@@ -16,6 +18,7 @@ on:
 jobs:
   smoke:
     runs-on: ubuntu-latest
+    if: false  # disabled — see header comment
     permissions:
       contents: read
     steps:
