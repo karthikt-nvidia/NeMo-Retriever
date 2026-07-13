@@ -1,19 +1,21 @@
 {
   "mode": "llm_judge",
   "judge": {
-    "model": "aws/anthropic/bedrock-claude-sonnet-4-6",
-    "dimensions": ["intent", "tool_choice", "citation", "answer_quality"],
-    "pass_threshold": 0.75
+    "model": "aws/anthropic/bedrock-claude-sonnet-4-6"
   },
-  "skills": ["nemo-retriever"],
+  "skills": [
+    "nemo-retriever"
+  ],
   "resources": {
     "platforms": {
       "local": {
-        "modes": ["cpu"]
+        "modes": [
+          "cpu"
+        ]
       }
     }
   },
-  "env": "The `retriever` CLI is pre-installed on PATH. The corpus is a folder of PDF reports bind-mounted read-only at /skills/nemo-retriever/eval/fixtures/research_reports/. Build the LanceDB index in the current working directory (./lancedb/nemo-retriever.lance) with `retriever ingest`. Embedding calls go to NVIDIA-hosted NIMs on integrate.api.nvidia.com; the harness injects NVIDIA_API_KEY into the container env — do not print or echo it.",
+  "env": "The `retriever` CLI is pre-installed on PATH. The corpus is a folder of PDF reports bind-mounted read-only at /skills/nemo-retriever/eval/fixtures/research_reports/. Build the LanceDB index in the current working directory (./lancedb/nemo-retriever.lance) with `retriever ingest`. Embedding calls go to NVIDIA-hosted NIMs on integrate.api.nvidia.com; the harness injects NVIDIA_API_KEY into the container env \u2014 do not print or echo it.",
   "expects": [
     {
       "query": "Search the PDF reports inside /skills/nemo-retriever/eval/fixtures/research_reports/ and answer: what is the on-call rotation process described in the Astra oncall report, and how does it connect to the AIQ Blueprint architecture? Cite the file each supporting excerpt comes from.",

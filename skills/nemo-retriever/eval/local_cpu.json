@@ -1,4 +1,5 @@
 {
+  "mode": "deterministic",
   "skills": ["nemo-retriever"],
   "resources": {
     "platforms": {

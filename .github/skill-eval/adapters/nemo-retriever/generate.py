@@ -169,7 +169,7 @@ def generate(spec_path: Path, skill_dir: Path, output_dir: Path, repo_root: Path
     if not expects:
         raise ValueError(f"{spec_path} has no expects entries")
 
-    judge_mode = spec.get("mode", "deterministic") == "llm_judge"
+    judge_mode = spec.get("mode", "llm_judge") == "llm_judge"
     verifier_src = JUDGE_VERIFIER if judge_mode else VERIFIER
     verifier_filename = verifier_src.name
 

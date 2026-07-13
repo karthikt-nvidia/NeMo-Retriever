@@ -3,11 +3,21 @@
 # SPDX-License-Identifier: Apache-2.0
 """LLM-as-judge verifier for nemo-retriever skill eval tasks.
 
-Mirrors nv_base/evaluation/dimension_judge.py: grades the agent trajectory
-against `expected_behavior` bullets on a per-dimension 0..1 scale using
-inference-api.nvidia.com (OpenAI-compatible). Same output contract as
-retriever_checks.py: writes reward.txt + retriever-checks.json to
-$NEMO_RETRIEVER_EVAL_VERIFIER_LOG_DIR (default /logs/verifier).
+Modeled on RAG's generic_judge.py (NVIDIA-AI-Blueprints/rag) — same
+per-check output shape so the shared dashboard parser renders fork rows
+identically to RAG rows.
+
+Given the eval spec's `expected_behavior` list, asks a judge model to grade
+each behavior independently as pass/fail with a supporting trajectory
+snippet and one-sentence rationale. Writes:
+
+  /logs/verifier/reward.txt   — single float: passed / total (0.0-1.0)
+  /logs/verifier/judge.json   — {spec, step, query, total, passed, reward,
+                                 trajectory_path, trajectory_found, checks:[]}
+  /logs/verifier/judge-raw.txt — raw judge model reply (debug only)
+
+Each check row: {check, pass, route:"agent", matched, rationale} — same keys
+RAG emits.
 """
 
 from __future__ import annotations
@@ -26,9 +36,7 @@ TRAJECTORY_CANDIDATES = (
     "/logs/agent/agent.log",
 )
 
-DEFAULT_DIMENSIONS = ["intent", "tool_choice", "citation", "answer_quality"]
 DEFAULT_MODEL = "aws/anthropic/bedrock-claude-sonnet-4-6"
-DEFAULT_THRESHOLD = 0.75
 
 
 def locate_trajectory() -> Path | None:
@@ -50,22 +58,29 @@ def read_trajectory() -> str:
     return path.read_text(errors="replace")
 
 
-def build_prompt(query: str, behaviors: list[str], dimensions: list[str], trajectory: str) -> str:
+def build_prompt(query: str, behaviors: list[str], trajectory: str) -> str:
     numbered = "\n".join(f"{i + 1}. {b}" for i, b in enumerate(behaviors)) or "(none provided)"
-    dims = ", ".join(dimensions)
     tail = trajectory[-40000:] if trajectory else "(empty)"
     return (
-        "You are a strict evaluator grading a retrieval agent's trajectory.\n"
+        "You are a strict evaluator grading a retrieval agent's trajectory.\n\n"
         f"User query: {query}\n\n"
+        "Grade each of these expected behaviors independently. For each,\n"
+        "decide pass/fail based only on evidence in the trajectory below.\n"
+        "Be conservative: penalise missing citations, wrong tool choice, or\n"
+        "leaked secrets.\n\n"
         "Expected behaviors:\n"
         f"{numbered}\n\n"
-        f"Grade each dimension from this list on a 0..1 scale: {dims}.\n"
-        "For each dimension include a short reason. Also produce an overall 0..1 score\n"
-        "as the weighted average of the dimensions. Be conservative: penalise missing\n"
-        "citations, wrong tool choice, or leaked secrets.\n\n"
+        "For each behavior, output:\n"
+        '  - "pass":      true if the agent clearly did this, false otherwise\n'
+        '  - "matched":   a short exact snippet from the trajectory that\n'
+        "                 supports pass (or empty string if fail / no evidence)\n"
+        '  - "rationale": one or two sentences justifying the verdict\n\n'
         "Return STRICT JSON only, no prose, matching this schema exactly:\n"
-        '{"dimensions": {"<dim>": {"score": <float>, "reason": "<string>"}, ...},\n'
-        ' "overall": <float>}\n\n'
+        '{"checks": [\n'
+        '  {"pass": <bool>, "matched": "<string>", "rationale": "<string>"},\n'
+        "  ...\n"
+        "]}\n\n"
+        "The array MUST have the same length and order as the numbered list above.\n\n"
         "Agent trajectory (tail):\n"
         "----- BEGIN TRAJECTORY -----\n"
         f"{tail}\n"
@@ -81,9 +96,9 @@ def call_judge(prompt: str, model: str) -> dict[str, Any]:
 
     # inference-api.nvidia.com (LiteLLM gateway) expects `sk-...`; the
     # container's NVIDIA_API_KEY is the `nvapi-...` embed-NIM cred. The
-    # harbor `--ae` layer already forwards ANTHROPIC_API_KEY set by the
-    # outer wrapper to the LiteLLM key, so use that. Allow an explicit
-    # override via NEMO_RETRIEVER_JUDGE_API_KEY.
+    # harbor `--ae` layer forwards ANTHROPIC_API_KEY set by the outer
+    # wrapper to the LiteLLM key, so use that. Allow explicit override
+    # via NEMO_RETRIEVER_JUDGE_API_KEY.
     api_key = (
         os.environ.get("NEMO_RETRIEVER_JUDGE_API_KEY")
         or os.environ.get("ANTHROPIC_API_KEY")
@@ -91,7 +106,8 @@ def call_judge(prompt: str, model: str) -> dict[str, Any]:
     )
     if not api_key:
         raise SystemExit(
-            "no judge API key set (NEMO_RETRIEVER_JUDGE_API_KEY / ANTHROPIC_API_KEY / NVIDIA_API_KEY)"
+            "no judge API key set (NEMO_RETRIEVER_JUDGE_API_KEY / "
+            "ANTHROPIC_API_KEY / NVIDIA_API_KEY)"
         )
 
     client = OpenAI(
@@ -100,7 +116,8 @@ def call_judge(prompt: str, model: str) -> dict[str, Any]:
             "NEMO_RETRIEVER_JUDGE_BASE", "https://inference-api.nvidia.com/v1"
         ),
     )
-    # LiteLLM proxies to Bedrock don't always honor response_format
+
+    # LiteLLM proxies to Bedrock don't always honour response_format
     # (silently return plain-text or empty). Try structured first, fall
     # back to unstructured + regex-extract of the first {...} block.
     def _create(with_response_format: bool):
@@ -131,7 +148,6 @@ def call_judge(prompt: str, model: str) -> dict[str, Any]:
     if not raw_content:
         raise ValueError("judge model returned empty content")
 
-    # Direct parse; else pull first JSON object from wrapped text.
     try:
         return json.loads(raw_content)
     except json.JSONDecodeError:
@@ -143,29 +159,25 @@ def call_judge(prompt: str, model: str) -> dict[str, Any]:
         return json.loads(match.group(0))
 
 
-def to_check_rows(grade: dict[str, Any], threshold: float) -> list[dict[str, Any]]:
+def to_check_rows(behaviors: list[str], grade: dict[str, Any]) -> list[dict[str, Any]]:
+    """Pair grade["checks"] items with behaviour strings by position.
+
+    If the grader returned fewer items than behaviours, pad with fails so
+    the reward reflects the miss. Extra items are truncated.
+    """
+    grade_items = grade.get("checks") or []
     rows: list[dict[str, Any]] = []
-    for dim, payload in (grade.get("dimensions") or {}).items():
-        score = float(payload.get("score", 0.0))
+    for i, behavior in enumerate(behaviors):
+        item = grade_items[i] if i < len(grade_items) else {}
         rows.append(
             {
-                "check": f"llm_judge:{dim}",
-                "pass": score >= threshold,
-                "route": "llm_judge",
-                "score": score,
-                "evidence": payload.get("reason", ""),
+                "check": behavior,
+                "pass": bool(item.get("pass", False)),
+                "route": "agent",
+                "matched": str(item.get("matched", "")),
+                "rationale": str(item.get("rationale", "")),
             }
         )
-    overall = float(grade.get("overall", 0.0))
-    rows.append(
-        {
-            "check": "llm_judge:overall",
-            "pass": overall >= threshold,
-            "route": "llm_judge",
-            "score": overall,
-            "evidence": f"weighted overall vs threshold {threshold}",
-        }
-    )
     return rows
 
 
@@ -173,6 +185,8 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--spec", required=True)
     parser.add_argument("--step", type=int, required=True)
+    parser.add_argument("--reward-file", default="/logs/verifier/reward.txt")
+    parser.add_argument("--details-file", default="/logs/verifier/judge.json")
     args = parser.parse_args()
 
     spec = json.loads(Path(args.spec).read_text())
@@ -183,39 +197,64 @@ def main() -> int:
     step = expects[args.step - 1]
     behaviors = step.get("expected_behavior") or []
     query = step.get("query", "")
+    if not behaviors:
+        raise SystemExit(
+            f"{args.spec} expects[{args.step}] has no expected_behavior list"
+        )
 
     judge_cfg = spec.get("judge") or {}
-    dimensions = judge_cfg.get("dimensions") or DEFAULT_DIMENSIONS
     model = judge_cfg.get("model") or DEFAULT_MODEL
-    threshold = float(judge_cfg.get("pass_threshold", DEFAULT_THRESHOLD))
 
     trajectory = read_trajectory()
-    prompt = build_prompt(query, behaviors, dimensions, trajectory)
+    traj_path = locate_trajectory()
+    prompt = build_prompt(query, behaviors, trajectory)
 
     try:
         grade = call_judge(prompt, model)
     except Exception as exc:  # noqa: BLE001 -- report cleanly, don't crash harbor
         print(f"JUDGE_ERROR: {exc}", file=sys.stderr)
         grade = {
-            "dimensions": {dim: {"score": 0.0, "reason": f"judge failed: {exc}"} for dim in dimensions},
-            "overall": 0.0,
+            "checks": [
+                {"pass": False, "matched": "", "rationale": f"judge failed: {exc}"}
+                for _ in behaviors
+            ]
         }
 
-    results = to_check_rows(grade, threshold)
+    results = to_check_rows(behaviors, grade)
     passed = sum(1 for r in results if r["pass"])
     total = len(results)
-    overall = next((r["score"] for r in results if r["check"] == "llm_judge:overall"), 0.0)
+    reward = (passed / total) if total else 0.0
 
-    log_dir = Path(os.environ.get("NEMO_RETRIEVER_EVAL_VERIFIER_LOG_DIR", "/logs/verifier"))
+    log_dir = Path(args.reward_file).parent
     log_dir.mkdir(parents=True, exist_ok=True)
-    (log_dir / "reward.txt").write_text(f"{overall:.6f}\n")
-    (log_dir / "retriever-checks.json").write_text(json.dumps(results, indent=2) + "\n")
-    (log_dir / "judge-grade.json").write_text(json.dumps(grade, indent=2) + "\n")
+    Path(args.reward_file).write_text(f"{reward}\n")
+    Path(args.details_file).write_text(
+        json.dumps(
+            {
+                "spec": args.spec,
+                "step": args.step,
+                "query": query,
+                "total": total,
+                "passed": passed,
+                "reward": reward,
+                "trajectory_path": str(traj_path) if traj_path else None,
+                "trajectory_found": traj_path is not None,
+                "checks": results,
+            },
+            indent=2,
+        )
+        + "\n"
+    )
 
     for r in results:
         status = "PASS" if r["pass"] else "FAIL"
-        print(f"{status} ({r['score']:.2f}): {r['check']} — {r['evidence']}")
-    print(f"=== LLM-judge overall: {overall:.3f} (threshold {threshold}); {passed}/{total} dims pass ===")
+        print(f"{status}: {r['check']}")
+        if r.get("rationale"):
+            print(f"  {r['rationale']}")
+    print(
+        f"=== Results: {passed} passed, {total - passed} failed (of {total}); "
+        f"reward={reward:.3f} ==="
+    )
     return 0
 
 

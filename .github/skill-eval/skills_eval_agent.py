@@ -105,7 +105,7 @@ def _validate_spec(spec_path: Path) -> dict[str, Any]:
         raise ValueError(f"{spec_path} must define resources.platforms")
     if not isinstance(spec["expects"], list) or not spec["expects"]:
         raise ValueError(f"{spec_path} must define non-empty expects list")
-    judge_mode = spec.get("mode", "deterministic") == "llm_judge"
+    judge_mode = spec.get("mode", "llm_judge") == "llm_judge"
     for idx, expect in enumerate(spec["expects"], start=1):
         if "query" not in expect:
             raise ValueError(f"{spec_path} expects[{idx}] must define query")
