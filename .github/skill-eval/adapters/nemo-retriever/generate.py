@@ -138,7 +138,7 @@ def _task_toml(
     total_steps: int,
 ) -> str:
     platform_short = PLATFORMS[platform]["short_name"]
-    step_suffix = f"-step-{step}" if total_steps > 1 else ""
+    step_suffix = f"-step-{step}"
     return "\n".join(
         [
             "[task]",
@@ -182,7 +182,7 @@ def generate(spec_path: Path, skill_dir: Path, output_dir: Path, repo_root: Path
             mode_slug = mode.lower().replace("_", "-")
             base_dir = output_dir / spec_stem / f"{PLATFORMS[platform]['short_name']}-{mode_slug}"
             for idx, expect in enumerate(expects, start=1):
-                step_dir = base_dir / f"step-{idx}" if len(expects) > 1 else base_dir
+                step_dir = base_dir / f"step-{idx}"
                 tests_dir = step_dir / "tests"
                 solution_dir = step_dir / "solution"
                 skills_dir = step_dir / "skills"

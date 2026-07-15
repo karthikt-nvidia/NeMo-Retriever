@@ -88,7 +88,7 @@ def build_prompt(query: str, behaviors: list[str], trajectory: str) -> str:
     )
 
 
-def call_judge(prompt: str, model: str) -> dict[str, Any]:
+def call_judge(prompt: str, model: str) -> tuple[dict[str, Any], float]:
     try:
         from openai import OpenAI
     except ImportError as exc:
@@ -131,12 +131,14 @@ def call_judge(prompt: str, model: str) -> dict[str, Any]:
         return client.chat.completions.create(**kwargs)
 
     raw_content = ""
+    last_response = None
     for attempt in (True, False):
         try:
             response = _create(with_response_format=attempt)
         except Exception as exc:  # noqa: BLE001
             print(f"JUDGE_ATTEMPT_ERROR (response_format={attempt}): {exc}", file=sys.stderr)
             continue
+        last_response = response
         raw_content = (response.choices[0].message.content or "").strip()
         if raw_content:
             break
@@ -148,22 +150,64 @@ def call_judge(prompt: str, model: str) -> dict[str, Any]:
     if not raw_content:
         raise ValueError("judge model returned empty content")
 
+    cost_usd = _extract_cost(last_response)
+
     try:
-        return json.loads(raw_content)
+        return json.loads(raw_content), cost_usd
     except json.JSONDecodeError:
         import re
 
         match = re.search(r"\{.*\}", raw_content, re.DOTALL)
         if not match:
             raise ValueError(f"judge reply is not JSON: {raw_content[:200]!r}")
-        return json.loads(match.group(0))
+        return json.loads(match.group(0)), cost_usd
 
 
-def to_check_rows(behaviors: list[str], grade: dict[str, Any]) -> list[dict[str, Any]]:
+# Rough per-1M-token pricing for the default judge model
+# (aws/anthropic/bedrock-claude-sonnet-4-6). Used as fallback when the
+# LiteLLM proxy does not surface `x-litellm-response-cost`.
+_SONNET_INPUT_PER_MTOK = 3.0
+_SONNET_OUTPUT_PER_MTOK = 15.0
+
+
+def _extract_cost(response: Any) -> float:
+    """Best-effort extraction of USD cost from an OpenAI-SDK response.
+
+    LiteLLM proxies sometimes attach cost in `_hidden_params` or the
+    response headers. Fall back to a token-based estimate using Sonnet
+    pricing so judge.json always has a `cost_usd` figure per check.
+    """
+    if response is None:
+        return 0.0
+    # LiteLLM-style hidden params
+    hidden = getattr(response, "_hidden_params", None) or {}
+    if isinstance(hidden, dict):
+        cost = hidden.get("response_cost")
+        if isinstance(cost, (int, float)) and cost > 0:
+            return float(cost)
+    usage = getattr(response, "usage", None)
+    if usage is None:
+        return 0.0
+    prompt_tokens = getattr(usage, "prompt_tokens", 0) or 0
+    completion_tokens = getattr(usage, "completion_tokens", 0) or 0
+    return (
+        prompt_tokens * _SONNET_INPUT_PER_MTOK
+        + completion_tokens * _SONNET_OUTPUT_PER_MTOK
+    ) / 1_000_000
+
+
+def to_check_rows(
+    behaviors: list[str],
+    grade: dict[str, Any],
+    cost_per_check: float = 0.0,
+) -> list[dict[str, Any]]:
     """Pair grade["checks"] items with behaviour strings by position.
 
     If the grader returned fewer items than behaviours, pad with fails so
-    the reward reflects the miss. Extra items are truncated.
+    the reward reflects the miss. Extra items are truncated. `cost_usd`
+    is the same for every row because our judge grades all behaviours in
+    a single call — total judge cost is split evenly across N checks so
+    the dashboard's per-check cost column has a meaningful value.
     """
     grade_items = grade.get("checks") or []
     rows: list[dict[str, Any]] = []
@@ -176,6 +220,7 @@ def to_check_rows(behaviors: list[str], grade: dict[str, Any]) -> list[dict[str,
                 "route": "agent",
                 "matched": str(item.get("matched", "")),
                 "rationale": str(item.get("rationale", "")),
+                "cost_usd": cost_per_check,
             }
         )
     return rows
@@ -210,7 +255,7 @@ def main() -> int:
     prompt = build_prompt(query, behaviors, trajectory)
 
     try:
-        grade = call_judge(prompt, model)
+        grade, total_cost = call_judge(prompt, model)
     except Exception as exc:  # noqa: BLE001 -- report cleanly, don't crash harbor
         print(f"JUDGE_ERROR: {exc}", file=sys.stderr)
         grade = {
@@ -219,8 +264,10 @@ def main() -> int:
                 for _ in behaviors
             ]
         }
+        total_cost = 0.0
 
-    results = to_check_rows(behaviors, grade)
+    cost_per_check = (total_cost / len(behaviors)) if behaviors else 0.0
+    results = to_check_rows(behaviors, grade, cost_per_check=cost_per_check)
     passed = sum(1 for r in results if r["pass"])
     total = len(results)
     reward = (passed / total) if total else 0.0
@@ -237,6 +284,7 @@ def main() -> int:
                 "total": total,
                 "passed": passed,
                 "reward": reward,
+                "cost_usd": total_cost,
                 "trajectory_path": str(traj_path) if traj_path else None,
                 "trajectory_found": traj_path is not None,
                 "checks": results,

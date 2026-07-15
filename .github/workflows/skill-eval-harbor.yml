@@ -1,12 +1,11 @@
 name: skill-eval-harbor
 
 # Runs the real harbor skill-eval pipeline (not the placeholder in
-# skill-eval-smoke.yml) against both nemo-retriever specs:
-#   * local_cpu.json           — deterministic verifier (retriever_checks.py)
-#   * local_cpu_agentic.json   — LLM-as-judge verifier (retriever_judge.py)
+# skill-eval-smoke.yml) against the nemo-retriever spec:
+#   * local_cpu.json   — LLM-as-judge verifier (retriever_judge.py)
 #
 # Uploads the raw harbor results tree under the same artifact name shape
-# the smoke workflow uses, so Sarath's bp-skill-eval-dashboard picks both
+# the smoke workflow uses, so Sarath's bp-skill-eval-dashboard picks it
 # up without contract drift: nemo-retriever-skill-eval-results-<run_id>.
 #
 # Corpus PDFs are gitignored, so we synthesize a small text-PDF fixture
@@ -26,7 +25,6 @@ on:
         options:
           - all
           - local_cpu
-          - local_cpu_agentic
 
 jobs:
   harbor:
@@ -73,7 +71,7 @@ jobs:
           from reportlab.lib.pagesizes import letter
           from reportlab.pdfgen import canvas
 
-          out = Path("skills/nemo-retriever/eval/fixtures/research_reports")
+          out = Path("skills/nemo-retriever/evals/fixtures/research_reports")
           out.mkdir(parents=True, exist_ok=True)
 
           fixtures = {
@@ -145,16 +143,16 @@ jobs:
               c.save()
               print(f"wrote {path} ({path.stat().st_size} bytes)")
           PY
-          ls -la skills/nemo-retriever/eval/fixtures/research_reports/
+          ls -la skills/nemo-retriever/evals/fixtures/research_reports/
 
       - name: Filter specs (optional single-spec run)
         if: ${{ inputs.spec != 'all' }}
         run: |
           set -euo pipefail
           keep="${{ inputs.spec }}.json"
-          find skills/nemo-retriever/eval -maxdepth 1 -name '*.json' -not -name "$keep" -print -delete
+          find skills/nemo-retriever/evals -maxdepth 1 -name '*.json' -not -name "$keep" -not -name 'evals.json' -print -delete
           echo "kept only: $keep"
-          ls skills/nemo-retriever/eval/
+          ls skills/nemo-retriever/evals/
 
       - name: Run harbor eval pipeline
         env:

@@ -87,7 +87,11 @@ def _changed_skill_names(base: str | None) -> set[str]:
 
 def _discover_specs(*, all_specs: bool, base: str | None) -> list[Path]:
     changed = _changed_skill_names(base)
-    specs = sorted((REPO_ROOT / "skills").glob("*/eval/*.json"))
+    specs = sorted(
+        p
+        for p in (REPO_ROOT / "skills").glob("*/evals/*.json")
+        if p.name != "evals.json"
+    )
     if all_specs or not changed:
         return specs
     return [spec for spec in specs if spec.parts[-3] in changed]
