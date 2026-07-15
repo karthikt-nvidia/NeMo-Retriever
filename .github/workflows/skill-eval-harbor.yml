@@ -154,6 +154,20 @@ jobs:
           echo "kept only: $keep"
           ls skills/nemo-retriever/evals/
 
+      - name: Ensure docker daemon is running
+        run: |
+          set -uo pipefail
+          if ! docker info >/dev/null 2>&1; then
+            echo "docker daemon not running — starting"
+            sudo systemctl start docker || sudo service docker start || true
+            for i in 1 2 3 4 5 6 7 8 9 10; do
+              docker info >/dev/null 2>&1 && break
+              sleep 1
+            done
+          fi
+          docker version
+          docker info | head -20
+
       - name: Run harbor eval pipeline
         env:
           # nvapi-... embed NIM cred (integrate.api.nvidia.com)
