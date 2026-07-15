@@ -156,7 +156,7 @@ jobs:
 
       - name: Ensure docker daemon is running
         run: |
-          set -uo pipefail
+          set -eu
           if ! docker info >/dev/null 2>&1; then
             echo "docker daemon not running — starting"
             sudo systemctl start docker || sudo service docker start || true
@@ -166,7 +166,6 @@ jobs:
             done
           fi
           docker version
-          docker info | head -20
 
       - name: Run harbor eval pipeline
         env:
